@@ -1,2 +1,2 @@
-# home-climate-monitor-sw
-Home Climate Monitor - Software and DB
+# home-climate-monitor-api
+Home Climate Monitor - DB API
