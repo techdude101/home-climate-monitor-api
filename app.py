@@ -6,7 +6,7 @@ import uuid
 import os
 
 from auth import authenticate
-from config import db, app, db_limit, fast_limit, limiter, cors, cross_origin
+from config import db, app, db_limit, fast_limit, limiter, cors, cross_origin, MongoEngine
 from models import Device, DeviceData
 from auth import validate_api_key, add_api_key
 from responses import generate_unauthorized, generate_bad_request
@@ -27,30 +27,34 @@ def get():
 @authenticate
 # @cross_origin()
 def create_device():
-  serial = request.json['serial']
   description = request.json['description']
   api_key = str(uuid.uuid4())
 
+  # Get last device serial number
+  last_device_serial = Device.objects().order_by('-serial').all()[0]
+  serial = last_device_serial.serial + 1
+  
   new_device = Device(serial=serial, description=description)
 
   try:
     new_device.save() # Store in DB
     add_api_key(api_key, serial)
-  except Exception as e:
-    print(f"Device create error {e}")
+  except Exception as ex:
+    if "duplicate key error" in ex.args[0]:
+      return generate_bad_request("Duplicate description")
+    print(f"Device create error {ex}")    
     return generate_bad_request("Something went wrong")
 
-  response = {"key": api_key, "serial": serial}
+  response = {"key": api_key, "serial": serial, "description": description}
 
   return response
-
 
 @db_limit
 @app.route('/device/update', methods=['PUT', 'PATCH'])
 @authenticate
 def update_device():
   data = request.json
-  #print(data)
+
   serial = None
   description = None
   if 'serial' in data:
@@ -87,16 +91,49 @@ def get_device_by_serial(serial_num=None):
 @app.route('/data/<int:serial_num>', methods=['POST'])
 @authenticate
 def add_data(serial_num=None):
-  serial_num = request.json['serial']
-  temperature = request.json['temperature']
-  humidity = request.json['humidity']
+  data = request.json
+  serial_num = None
+  temperature = None
+  humidity = None
+  battery = None
+  
+  if data:
+    if 'serial' in data:
+      serial_num = data['serial']
+    
+    if 'temperature' in data:
+      temperature = data['temperature']
+    if 'humidity' in data:
+      humidity = data['humidity']
+    if 'battery' in data:
+      battery = data['battery']
+  else:
+    return generate_bad_request("Invalid request parameters")  
+  
   device = Device.objects(serial=serial_num).first()
   if device != None:
     timestamp = datetime.datetime.now()
+    new_device_data = None
 
-    new_device_data = DeviceData(temperature=temperature, humidity=humidity, timestamp=timestamp, device_id=device._id)
-    new_device_data.save()
-    return jsonify(new_device_data)
+    # Temperature, humidity and battery
+    if temperature != None and humidity != None and battery != None:
+      new_device_data = DeviceData(temperature=temperature, humidity=humidity, battery=battery, timestamp=timestamp, device_id=device._id)  
+
+    # Temperature and humidity
+    if temperature != None and humidity != None and battery == None:
+      new_device_data = DeviceData(temperature=temperature, humidity=humidity, timestamp=timestamp, device_id=device._id)  
+
+    # Temperature only
+    if temperature != None and humidity == None and battery == None:
+      new_device_data = DeviceData(temperature=temperature, timestamp=timestamp, device_id=device._id)  
+    
+    # Temperature and battery
+    if temperature != None and humidity == None and battery != None:
+      new_device_data = DeviceData(temperature=temperature, battery=battery, timestamp=timestamp, device_id=device._id)  
+    
+    if new_device_data != None:
+      new_device_data.save()
+      return jsonify(new_device_data)
   return generate_bad_request("Error saving data")
 
 
@@ -104,7 +141,7 @@ def add_data(serial_num=None):
 def get_all_data(serial):
   start_date_str = request.args.get('start', None)
   end_date_str = request.args.get('end', None)
-  #print(f"Args: {request.args.get('start')}")
+
   device_serial = serial
   device = Device.objects(serial=device_serial).first_or_404()
   data = DeviceData.objects(device_id=device._id).order_by('-timestamp').all()
@@ -113,8 +150,6 @@ def get_all_data(serial):
   if start_date_str != None and end_date_str != None:
     start_date_time = datetime.datetime.fromisoformat(start_date_str)
     end_date_time = datetime.datetime.fromisoformat(end_date_str)
-
-    #print(f"Start: {start_date_time}, End: {end_date_time}")
 
     data = DeviceData.objects(device_id=device._id, timestamp__gte=start_date_time,
                                         timestamp__lte=end_date_time).order_by('-timestamp').all()
